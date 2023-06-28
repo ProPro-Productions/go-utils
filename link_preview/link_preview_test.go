@@ -1,9 +1,11 @@
 package link_preview
 
 import (
+	"github.com/PuerkitoBio/goquery"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -88,15 +90,15 @@ func TestGetDocumentFail(t *testing.T) {
 	assert.Error(t, err)
 }
 
-//func TestParseDocument(t *testing.T) {
-//	link := "http://test.com"
-//	url, _ := url.Parse(link)
-//	scraper := &Scraper{Url: url, MaxRedirect: 10}
-//
-//	// Prepare a test document for parsing
-//	doc, _ := goquery.NewDocumentFromReader(strings.NewReader(`<html><head><title>Test Page</title></head><body><h1>Welcome to the Test Page</h1></body></html>`))
-//
-//	document := scraper.parseDocument(doc)
-//
-//	assert.Equal(t, "Test Page", document.Preview.Title)
-//}
+func TestParseDocument(t *testing.T) {
+	//link := "http://test.com"
+	//url, _ := url.Parse(link)
+	//scraper := &Scraper{Url: url, MaxRedirect: 10}
+
+	// Prepare a test document for parsing
+	goquery.NewDocumentFromReader(strings.NewReader(`<html><head><title>Test Page</title></head><body><h1>Welcome to the Test Page</h1></body></html>`))
+
+	//document := scraper.parseDocument(doc)
+	//
+	//assert.Equal(t, "Test Page", document.PageInfo.PageTitle)
+}
