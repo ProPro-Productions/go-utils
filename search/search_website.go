@@ -4,11 +4,10 @@ import (
 	"context"
 	"fmt"
 	"github.com/gocolly/colly/v2"
+	"github.com/gocolly/colly/v2/proxy"
 	"strings"
 
 	"errors"
-	"github.com/gocolly/colly/v2/proxy"
-
 	"golang.org/x/time/rate"
 )
 
@@ -265,6 +264,15 @@ type SearchOptions struct {
 	ProxyAddr string
 }
 
+// defaultOptions creates a SearchOptions with default values.
+func defaultOptions() SearchOptions {
+	return SearchOptions{
+		CountryCode:  "us",
+		LanguageCode: "en",
+		UserAgent:    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36",
+	}
+}
+
 // SearchGoogle returns a list of search results from Google.
 func SearchGoogle(ctx context.Context, searchTerm string, opts ...SearchOptions) ([]Result, error) {
 	if ctx == nil {
@@ -275,89 +283,82 @@ func SearchGoogle(ctx context.Context, searchTerm string, opts ...SearchOptions)
 		return nil, err
 	}
 
-	c := colly.NewCollector(colly.MaxDepth(1))
 	if len(opts) == 0 {
-		opts = append(opts, SearchOptions{})
+		opts = append(opts, defaultOptions())
 	}
 
-	if opts[0].UserAgent == "" {
-		c.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36"
-	} else {
-		c.UserAgent = opts[0].UserAgent
-	}
+	option := opts[0]
+
+	c := colly.NewCollector(colly.MaxDepth(1))
+	c.UserAgent = option.UserAgent
+
+	var results []Result
+	var rank int
+	var rErr error
 
 	var lc string
-	if opts[0].LanguageCode == "" {
+	if option.LanguageCode == "" {
 		lc = "en"
 	} else {
-		lc = opts[0].LanguageCode
+		lc = option.LanguageCode
 	}
-
-	results := []Result{}
-	var rErr error
-	rank := 1
 
 	c.OnRequest(func(r *colly.Request) {
-		if err := ctx.Err(); err != nil {
-			r.Abort()
-			rErr = err
-			return
-		}
+		r.Headers.Set("Accept-Language", lc)
 	})
 
-	c.OnError(func(r *colly.Response, err error) {
-		rErr = err
-	})
-
-	// https://www.w3schools.com/cssref/css_selectors.asp
-	c.OnHTML("div.g", func(e *colly.HTMLElement) {
-
-		sel := e.DOM
-
-		linkHref, _ := sel.Find("a").Attr("href")
-		linkText := strings.TrimSpace(linkHref)
-		titleText := strings.TrimSpace(sel.Find("div > div > div > a > h3").Text())
-		descText := strings.TrimSpace(sel.Find("div > div > div > div:first-child > span:first-child").Text())
-
-		if linkText != "" && linkText != "#" && titleText != "" {
-			result := Result{
-				Rank:        rank,
-				URL:         linkText,
-				Title:       titleText,
-				Description: descText,
-			}
-			results = append(results, result)
-			rank += 1
-		}
-	})
-
-	limit := opts[0].Limit
-	if opts[0].OverLimit {
-		limit = int(float64(opts[0].Limit) * 1.5)
-	}
-
-	url := url(searchTerm, opts[0].CountryCode, lc, limit, opts[0].Start)
-
-	if opts[0].ProxyAddr != "" {
-		rp, err := proxy.RoundRobinProxySwitcher(opts[0].ProxyAddr)
+	if option.ProxyAddr != "" {
+		rp, err := proxy.RoundRobinProxySwitcher(option.ProxyAddr)
 		if err != nil {
 			return nil, err
 		}
 		c.SetProxyFunc(rp)
 	}
 
-	c.Visit(url)
-
-	if rErr != nil {
-		if strings.Contains(rErr.Error(), "Too Many Requests") {
-			return nil, ErrBlocked
+	c.OnHTML("div.g", func(e *colly.HTMLElement) {
+		if rErr != nil || (option.Limit != 0 && len(results) >= option.Limit) {
+			return
 		}
-		return nil, rErr
+
+		sel := e.DOM
+
+		item := Result{
+			Rank:        rank,
+			URL:         sel.Find("a").AttrOr("href", ""),
+			Title:       strings.TrimSpace(sel.Find("h3").Text()),
+			Description: strings.TrimSpace(sel.Find("span.st").Text()),
+		}
+
+		if item.Title != "" && item.Description != "" && item.URL != "" {
+			results = append(results, item)
+		}
+
+		rank++
+	})
+
+	c.OnError(func(r *colly.Response, err error) {
+		if r.StatusCode == 429 {
+			rErr = ErrBlocked
+		} else {
+			rErr = err
+		}
+	})
+
+	//url := stdGoogleBase + GoogleDomains[option.CountryCode] + fmt.Sprintf("&start=%d", option.Start)
+	constructedURL := url(searchTerm, option.CountryCode, option.LanguageCode, option.Limit, option.Start)
+	err := c.Visit(constructedURL)
+	if err != nil {
+		return nil, err
+	}
+	err = c.Visit(constructedURL)
+	if err != nil {
+		return nil, err
 	}
 
-	// Reduce results to max limit
-	if opts[0].Limit != 0 && len(results) > opts[0].Limit {
-		return results[:opts[0].Limit], nil
+	c.Wait()
+
+	if rErr != nil {
+		return nil, rErr
 	}
 
 	return results, nil
