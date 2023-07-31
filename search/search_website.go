@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"fmt"
 	"github.com/PuerkitoBio/goquery"
 	"log"
 	"net/http"
@@ -316,24 +317,59 @@ func SearchGoogle(ctx context.Context, searchTerm string, opts ...SearchOptions)
 	if err != nil {
 		return nil, err
 	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Println("Received non-200 response code")
+		return nil, fmt.Errorf("Received non-200 response code: %d", resp.StatusCode)
+	}
 	defer resp.Body.Close()
 
+	results, err := parseResults(resp)
+	if err != nil {
+		log.Println("Error parsing results")
+		return nil, err
+	}
+
+	return results, nil
+}
+
+func containsAny(text string, values ...string) bool {
+	for _, value := range values {
+		if strings.Contains(text, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseResults(resp *http.Response) ([]Result, error) {
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	// write the body to file as html
-	log.Println(doc.Nodes)
 	if err != nil {
 		return nil, err
 	}
 
 	var results []Result
-	doc.Find(".g").Each(func(i int, s *goquery.Selection) {
-		log.Println(s.Find(".LC20lb.DKV0Md").Text())
+	s := doc.Find(".g")
+	rank := 1
+
+	log.Println("extract s", s)
+
+	s.Each(func(i int, el *goquery.Selection) {
 		result := Result{}
 
-		result.Title = s.Find(".LC20lb.DKV0Md").Text()
-		result.URL, _ = s.Find(".yuRUbf a").Attr("href")
-		result.Description = s.Find(".VwiC3b.yXK7lf.MUxGbd.yDYNvb.lyLwlc").Text()
-		result.Rank = i + 1
+		result.Rank = rank
+		rank++
+
+		titleEl := el.Find(".LC20lb.DKV0Md")
+		result.Title = titleEl.Text()
+
+		link, _ := titleEl.Attr("href")
+		parsedLink, _ := url.Parse(link)
+		result.URL = "http://" + parsedLink.Host + parsedLink.Path
+
+		desc := el.Find(".aCOpRe span")
+		result.Description = desc.Text()
+
 		results = append(results, result)
 	})
 
