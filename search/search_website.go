@@ -2,17 +2,28 @@ package search
 
 import (
 	"context"
-	"fmt"
-	"github.com/gocolly/colly/v2"
-	"github.com/gocolly/colly/v2/proxy"
+	"github.com/PuerkitoBio/goquery"
+	"log"
+	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"errors"
 	"golang.org/x/time/rate"
 )
 
+// ErrBlocked indicates that Google has detected that you were scraping and temporarily blocked you.
+// The duration of the block is unspecified.
+//
+// See: https://github.com/rocketlaunchr/google-search#warning-warning
 var ErrBlocked = errors.New("google block")
 
+// RateLimit sets a global limit to how many requests to Google Search can be made in a given time interval.
+// The default is unlimited (but obviously Google Search will block you temporarily if you do too many
+// calls too quickly).
+//
+// See: https://godoc.org/golang.org/x/time/rate#NewLimiter
 var RateLimit = rate.NewLimiter(rate.Inf, 0)
 
 // Result represents a single result from Google Search.
@@ -34,6 +45,8 @@ type Result struct {
 const stdGoogleBase = "https://www.google."
 
 // GoogleDomains represents localized Google homepages. The 2 letter country code is based on ISO 3166-1 alpha-2.
+//
+// See: https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2
 var GoogleDomains = map[string]string{
 	"us":  "com/search?q=",
 	"ac":  "ac/search?q=",
@@ -264,15 +277,6 @@ type SearchOptions struct {
 	ProxyAddr string
 }
 
-// defaultOptions creates a SearchOptions with default values.
-func defaultOptions() SearchOptions {
-	return SearchOptions{
-		CountryCode:  "us",
-		LanguageCode: "en",
-		UserAgent:    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36",
-	}
-}
-
 // SearchGoogle returns a list of search results from Google.
 func SearchGoogle(ctx context.Context, searchTerm string, opts ...SearchOptions) ([]Result, error) {
 	if ctx == nil {
@@ -283,85 +287,69 @@ func SearchGoogle(ctx context.Context, searchTerm string, opts ...SearchOptions)
 		return nil, err
 	}
 
-	if len(opts) == 0 {
-		opts = append(opts, defaultOptions())
+	// Checking options
+	opt := SearchOptions{}
+	if len(opts) > 0 {
+		opt = opts[0]
 	}
 
-	option := opts[0]
+	if opt.UserAgent == "" {
+		opt.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36"
+	}
 
-	c := colly.NewCollector(colly.MaxDepth(1))
-	c.UserAgent = option.UserAgent
+	client := &http.Client{}
+	log.Println(getSearchURL(searchTerm, opt))
+	req, err := http.NewRequest("GET", getSearchURL(searchTerm, opt), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", opt.UserAgent)
+	if opt.ProxyAddr != "" {
+		proxyUrl, _ := url.Parse(opt.ProxyAddr)
+		client.Transport = &http.Transport{
+			Proxy: http.ProxyURL(proxyUrl),
+		}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	// write the body to file as html
+	log.Println(doc.Nodes)
+	if err != nil {
+		return nil, err
+	}
 
 	var results []Result
-	var rank int
-	var rErr error
+	doc.Find(".g").Each(func(i int, s *goquery.Selection) {
+		log.Println(s.Find(".LC20lb.DKV0Md").Text())
+		result := Result{}
 
-	var lc string
-	if option.LanguageCode == "" {
-		lc = "en"
-	} else {
-		lc = option.LanguageCode
-	}
-
-	c.OnRequest(func(r *colly.Request) {
-		r.Headers.Set("Accept-Language", lc)
+		result.Title = s.Find(".LC20lb.DKV0Md").Text()
+		result.URL, _ = s.Find(".yuRUbf a").Attr("href")
+		result.Description = s.Find(".VwiC3b.yXK7lf.MUxGbd.yDYNvb.lyLwlc").Text()
+		result.Rank = i + 1
+		results = append(results, result)
 	})
-
-	if option.ProxyAddr != "" {
-		rp, err := proxy.RoundRobinProxySwitcher(option.ProxyAddr)
-		if err != nil {
-			return nil, err
-		}
-		c.SetProxyFunc(rp)
-	}
-
-	c.OnHTML("div.g", func(e *colly.HTMLElement) {
-		if rErr != nil || (option.Limit != 0 && len(results) >= option.Limit) {
-			return
-		}
-
-		sel := e.DOM
-
-		item := Result{
-			Rank:        rank,
-			URL:         sel.Find("a").AttrOr("href", ""),
-			Title:       strings.TrimSpace(sel.Find("h3").Text()),
-			Description: strings.TrimSpace(sel.Find("span.st").Text()),
-		}
-
-		if item.Title != "" && item.Description != "" && item.URL != "" {
-			results = append(results, item)
-		}
-
-		rank++
-	})
-
-	c.OnError(func(r *colly.Response, err error) {
-		if r.StatusCode == 429 {
-			rErr = ErrBlocked
-		} else {
-			rErr = err
-		}
-	})
-
-	//url := stdGoogleBase + GoogleDomains[option.CountryCode] + fmt.Sprintf("&start=%d", option.Start)
-	constructedURL := url(searchTerm, option.CountryCode, option.LanguageCode, option.Limit, option.Start)
-	err := c.Visit(constructedURL)
-	if err != nil {
-		return nil, err
-	}
-	err = c.Visit(constructedURL)
-	if err != nil {
-		return nil, err
-	}
-
-	c.Wait()
-
-	if rErr != nil {
-		return nil, rErr
-	}
 
 	return results, nil
+}
+
+func getSearchURL(searchTerm string, opts SearchOptions) string {
+	base := stdGoogleBase
+	if val, ok := GoogleDomains[opts.CountryCode]; ok {
+		base += val
+	} else {
+		base += GoogleDomains["us"]
+	}
+
+	query := url.QueryEscape(searchTerm)
+	return base + query + "&hl=" + opts.LanguageCode + "&start=" + strconv.Itoa(opts.Start)
 }
 
 func base(url string) string {
@@ -372,30 +360,30 @@ func base(url string) string {
 	}
 }
 
-func url(searchTerm string, countryCode string, languageCode string, limit int, start int) string {
-	searchTerm = strings.Trim(searchTerm, " ")
-	searchTerm = strings.Replace(searchTerm, " ", "+", -1)
-	countryCode = strings.ToLower(countryCode)
-
-	var url string
-
-	if googleBase, found := GoogleDomains[countryCode]; found {
-		if start == 0 {
-			url = fmt.Sprintf("%s%s&hl=%s", base(googleBase), searchTerm, languageCode)
-		} else {
-			url = fmt.Sprintf("%s%s&hl=%s&start=%d", base(googleBase), searchTerm, languageCode, start)
-		}
-	} else {
-		if start == 0 {
-			url = fmt.Sprintf("%s%s&hl=%s", stdGoogleBase+GoogleDomains["us"], searchTerm, languageCode)
-		} else {
-			url = fmt.Sprintf("%s%s&hl=%s&start=%d", stdGoogleBase+GoogleDomains["us"], searchTerm, languageCode, start)
-		}
-	}
-
-	if limit != 0 {
-		url = fmt.Sprintf("%s&num=%d", url, limit)
-	}
-
-	return url
-}
+//func url(searchTerm string, countryCode string, languageCode string, limit int, start int) string {
+//	searchTerm = strings.Trim(searchTerm, " ")
+//	searchTerm = strings.Replace(searchTerm, " ", "+", -1)
+//	countryCode = strings.ToLower(countryCode)
+//
+//	var url string
+//
+//	if googleBase, found := GoogleDomains[countryCode]; found {
+//		if start == 0 {
+//			url = fmt.Sprintf("%s%s&hl=%s", base(googleBase), searchTerm, languageCode)
+//		} else {
+//			url = fmt.Sprintf("%s%s&hl=%s&start=%d", base(googleBase), searchTerm, languageCode, start)
+//		}
+//	} else {
+//		if start == 0 {
+//			url = fmt.Sprintf("%s%s&hl=%s", stdGoogleBase+GoogleDomains["us"], searchTerm, languageCode)
+//		} else {
+//			url = fmt.Sprintf("%s%s&hl=%s&start=%d", stdGoogleBase+GoogleDomains["us"], searchTerm, languageCode, start)
+//		}
+//	}
+//
+//	if limit != 0 {
+//		url = fmt.Sprintf("%s&num=%d", url, limit)
+//	}
+//
+//	return url
+//}
