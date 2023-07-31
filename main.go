@@ -4,7 +4,7 @@ import (
 	"context"
 	"log"
 
-	"github.com/elliot14A/practice/search"
+	"github.com/propro-productions/go-utils/search"
 )
 
 func main() {

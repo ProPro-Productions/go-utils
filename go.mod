@@ -1,4 +1,4 @@
-module github.com/elliot14A/practice
+module github.com/propro-productions/go-utils
 
 go 1.20
 
